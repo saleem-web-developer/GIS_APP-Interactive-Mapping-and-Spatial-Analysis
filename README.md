@@ -1,5 +1,5 @@
 # GIS_APP-Interactive-Mapping-and-Spatial-Analysis
-This application is built using Tkinter, GeoPandas, Matplotlib, Rasterio, and other essential GIS libraries, providing a user-friendly GUI for performing advanced spatial operations.
+This repository hosts a Python-based GIS application designed for interactive mapping and spatial analysis. Built with a user-friendly graphical interface using Tkinter, the application supports visualization and management of vector and raster data. Key features include dynamic zooming, layer management, symbology customization, and transparency adjustments. Advanced spatial analysis tools such as buffering, clipping, and extract-by-mask are integrated, enabling users to perform complex geospatial operations efficiently. The application also connects seamlessly with PostgreSQL/PostGIS databases, allowing for database-driven spatial data handling. Results of analyses can be exported to formats like shapefiles and GeoTIFFs, ensuring compatibility with other GIS platforms. Powered by libraries like GeoPandas, Matplotlib, and Rasterio, this toolkit is ideal for geospatial professionals and researchers seeking a robust and intuitive GIS solution
 ![image](https://github.com/user-attachments/assets/31989699-1645-45c9-aab4-05ad17c6aa83)
 
 
