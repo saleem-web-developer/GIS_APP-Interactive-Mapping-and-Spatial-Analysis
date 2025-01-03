@@ -1,0 +1,642 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+from tkinter import colorchooser
+import geopandas as gpd
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import os
+from psycopg2 import connect
+import rasterio
+from rasterio.enums import Resampling
+from rasterio.plot import show
+from rasterio.mask import mask 
+from tkinter import Toplevel
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+import matplotlib.patches as mpatches
+import numpy as np
+
+
+class GISApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("GIS Application with Buffer and Multi-Layer Clip Tools")
+        self.layers = []  # Store layers as dictionaries
+        self.rasters = []
+        self.xlim = None  # Initialize zoom variables
+        self.ylim = None
+        self.setup_ui()
+
+    def setup_ui(self):
+        # Sidebar for Layer Controls
+        self.sidebar = tk.Frame(self.root, width=250, padx=5, pady=5)
+        self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
+
+        # Map Display
+        self.map_frame = tk.Frame(self.root)
+        self.map_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        # Layer List
+        tk.Label(self.sidebar, text="Layers", font=("Arial", 14)).pack(pady=5)
+        self.layer_list = tk.Listbox(self.sidebar, selectmode=tk.SINGLE)
+        self.layer_list.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        # Buttons
+        tk.Button(self.sidebar, text="Add Layer", command=self.add_layer).pack(pady=5)
+        tk.Button(self.sidebar, text="Add Raster", command=self.add_raster).pack(pady=5)
+        tk.Button(self.sidebar, text="Remove Layer", command=self.remove_layer).pack(pady=5)
+        tk.Button(self.sidebar, text="Toggle Visibility", command=self.toggle_visibility).pack(pady=5)
+        tk.Button(self.sidebar, text="Set Symbology", command=self.set_symbology).pack(pady=5)
+        tk.Button(self.sidebar, text="Buffer Tool", command=self.run_buffer_tool).pack(pady=5)
+        tk.Button(self.sidebar, text="Clip Tool", command=self.run_clip_tool).pack(pady=5)
+        tk.Button(self.sidebar, text="Fetch Data from DB", command=self.fetch_data_from_db).pack(pady=5)
+        tk.Button(self.sidebar, text="Zoom In", command=self.zoom_in).pack(pady=5)
+        tk.Button(self.sidebar, text="Zoom Out", command=self.zoom_out).pack(pady=5)
+        tk.Button(self.sidebar, text="Extract by Mask", command=self.run_extract_by_mask).pack(pady=5)
+        tk.Button(self.sidebar, text="Graph", command=self.generate_raster_histogram).pack(pady=5)
+        tk.Button(self.sidebar, text="NDVI", command=self.run_ndvi_tool).pack(pady=5)
+        
+        # Transparency Slider
+        tk.Label(self.sidebar, text="Transparency").pack()
+        self.transparency_slider = ttk.Scale(self.sidebar, from_=0, to=1, value=1, command=self.update_transparency)
+        self.transparency_slider.pack(fill=tk.X, pady=5)
+
+        # Matplotlib Figure
+        self.fig, self.ax = plt.subplots()
+        self.canvas = FigureCanvasTkAgg(self.fig, self.map_frame)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.canvas.mpl_connect("scroll_event", self.adjust_zoom) 
+
+    def add_layer(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Shapefiles", "*.shp")])
+        if file_path:
+            try:
+                gdf = gpd.read_file(file_path)
+                layer_name = os.path.basename(file_path)
+                layer = {
+                    "gdf": gdf,
+                    "name": layer_name,
+                    "path": file_path,
+                    "visible": True,
+                    "color": "blue",
+                    "alpha": 1.0,
+                }
+                self.layers.append(layer)
+                self.layer_list.insert(tk.END, layer_name)
+                self.refresh_map()
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load shapefile: {e}")
+                
+    def add_raster(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Raster files", "*.tif *.jpg *.png")])
+        if file_path:
+            try:
+                raster = rasterio.open(file_path)
+                raster_name = os.path.basename(file_path)
+                self.rasters.append({
+                    "raster": raster,
+                    "name": raster_name,
+                    "path": file_path,
+                    "visible": True,
+                    "colormap": "gray",  # Default colormap
+                    "alpha": 1.0,  # Default transparency
+                })
+                self.layer_list.insert(tk.END, raster_name)
+                self.refresh_map()
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load raster: {e}")
+                
+    def run_ndvi_tool(self):
+        """Handle NDVI calculation when the button is pressed."""
+        # Prompt the user to select a raster image (Red and NIR bands)
+        raster_file = tk.filedialog.askopenfilename(
+            title="Select Raster Image", filetypes=[("GeoTIFF files", "*.tif")]
+        )
+        if not raster_file:
+            messagebox.showwarning("Warning", "No raster image selected.")
+            return
+
+        # Open the selected raster file
+        with rasterio.open(raster_file) as src:
+            # Read the Red and NIR bands (assuming Red is band 3 and NIR is band 4)
+            red_band = src.read(3)  # Red band (adjust index based on your raster)
+            nir_band = src.read(4)  # Near-Infrared band (adjust index based on your raster)
+
+            # Compute NDVI
+            with np.errstate(divide='ignore', invalid='ignore'):  # Handle potential divide by zero
+                ndvi = (nir_band - red_band) / (nir_band + red_band)
+
+            # Mask invalid NDVI values (e.g., divide by zero errors or NaN)
+            ndvi = np.ma.masked_invalid(ndvi)
+
+            # Save the NDVI output
+            output_dir = os.path.dirname(raster_file)
+            output_path = os.path.join(output_dir, "ndvi_output.tif")
+
+            # Create a new metadata dictionary for the NDVI raster
+            output_meta = src.meta.copy()
+            output_meta.update({
+                "dtype": "float32",  # NDVI is usually a float value
+                "count": 1,  # Only one NDVI band
+            })
+
+            # Save the NDVI as a new raster
+            with rasterio.open(output_path, "w", **output_meta) as dst:
+                dst.write(ndvi.filled(0), 1)  # Fill NaN values with 0 or another placeholder
+
+            # Add the new NDVI layer to the map
+            self.rasters.append({
+                "raster": rasterio.open(output_path),
+                "name": "NDVI",
+                "path": output_path,
+                "visible": True,
+                "colormap": "RdYlGn",  # Choose an appropriate colormap for NDVI
+                "alpha": 1.0,
+            })
+            self.layer_list.insert(tk.END, "NDVI")
+            self.refresh_map()
+
+            messagebox.showinfo("Success", f"NDVI layer saved to {output_path}")
+                
+    def generate_raster_histogram(self):
+        selected = self.layer_list.curselection()
+        if not selected:
+            messagebox.showwarning("Warning", "No raster selected.")
+            return
+
+        index = selected[0]
+
+        # Check if the selection corresponds to a raster layer
+        if index < len(self.layers):
+            messagebox.showwarning("Warning", "Selected item is not a raster.")
+            return
+
+        raster_index = index - len(self.layers)
+        raster = self.rasters[raster_index]
+
+        try:
+            with rasterio.open(raster["path"]) as src:
+                # Read the first band of the raster
+                band_data = src.read(1)
+                band_data = band_data[band_data > 0]  # Ignore zero or no-data values
+
+                # Create a new window for the histogram
+                hist_window = Toplevel(self.root)
+                hist_window.title(f"Histogram of {raster['name']}")
+
+                # Create a matplotlib figure
+                fig = Figure(figsize=(8, 5))
+                ax = fig.add_subplot(111)
+                ax.hist(band_data.ravel(), bins=50, color="blue", alpha=0.7)
+                ax.set_title(f"Histogram of {raster['name']}")
+                ax.set_xlabel("Pixel Value")
+                ax.set_ylabel("Frequency")
+                ax.grid(True)
+
+                # Embed the figure in the Tkinter window
+                canvas = FigureCanvasTkAgg(fig, hist_window)
+                canvas.draw()
+                canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to generate histogram: {e}")
+
+
+                
+    def zoom_in(self):
+        """Zoom in the map."""
+        self.adjust_zoom(scale_factor=0.8)  # Smaller scale factor zooms in
+
+    def zoom_out(self):
+        """Zoom out the map."""
+        self.adjust_zoom(scale_factor=1.2)  # Larger scale factor zooms out
+                
+    def adjust_zoom(self, scale_factor):
+        """Adjust the zoom level by a scale factor."""
+        if self.xlim is None or self.ylim is None:
+            # If no limits are set, initialize them to the current axis limits
+            self.xlim = self.ax.get_xlim()
+            self.ylim = self.ax.get_ylim()
+
+        x_min, x_max = self.xlim
+        y_min, y_max = self.ylim
+
+        # Calculate the new limits
+        x_mid = (x_max + x_min) / 2
+        y_mid = (y_max + y_min) / 2
+        x_range = (x_max - x_min) * scale_factor
+        y_range = (y_max - y_min) * scale_factor
+
+        self.xlim = [x_mid - x_range / 2, x_mid + x_range / 2]
+        self.ylim = [y_mid - y_range / 2, y_mid + y_range / 2]
+
+        self.refresh_map()  # Refresh the map to apply zoom
+                
+    def set_symbology(self):
+        selected = self.layer_list.curselection()
+        if not selected:
+            messagebox.showwarning("Warning", "No layer or raster selected.")
+            return
+
+        index = selected[0]
+
+        if index < len(self.layers):  # Vector layer
+            # Open color chooser for vector layer
+            color = colorchooser.askcolor(title="Choose Color")[1]
+            if color:
+                self.layers[index]["color"] = color
+        else:  # Raster layer
+            raster_index = index - len(self.layers)
+
+            # Open a colormap dialog for raster layer
+            colormap_window = tk.Toplevel(self.root)
+            colormap_window.title("Select Colormap")
+
+            tk.Label(colormap_window, text="Select Matplotlib Colormap:").pack(pady=5)
+            colormap_options = [
+                "viridis", "plasma", "magma", "inferno", "cividis", "cool", "hot", 
+                "spring", "summer", "autumn", "winter", "Greys", "Purples", "Blues", 
+                "Greens", "Oranges", "Reds"
+            ]
+            colormap_combo = ttk.Combobox(colormap_window, values=colormap_options, state="readonly")
+            colormap_combo.pack(pady=5)
+
+            def apply_colormap():
+                colormap = colormap_combo.get()
+                if colormap:
+                    try:
+                        self.rasters[raster_index]["colormap"] = colormap
+                        self.refresh_map()
+                        colormap_window.destroy()
+                    except Exception as e:
+                        messagebox.showerror("Error", f"Failed to apply colormap: {e}")
+
+            tk.Button(colormap_window, text="Apply", command=apply_colormap).pack(pady=10)
+
+        self.refresh_map()
+
+
+    def remove_layer(self):
+        selected = self.layer_list.curselection()
+        if not selected:
+            messagebox.showwarning("Warning", "No layer or raster selected.")
+            return
+
+        index = selected[0]
+
+        if index < len(self.layers):  # If it's a vector layer
+            self.layers.pop(index)
+        else:  # If it's a raster
+            raster_index = index - len(self.layers)
+            self.rasters.pop(raster_index)
+
+        self.layer_list.delete(index)  # Remove from the Listbox
+        self.refresh_map()  # Update the map to reflect the changes
+
+
+    def toggle_visibility(self):
+        selected = self.layer_list.curselection()
+        if not selected:
+            messagebox.showwarning("Warning", "No layer or raster selected.")
+            return
+
+        index = selected[0]
+
+        if index < len(self.layers):  # If it's a vector layer
+            layer = self.layers[index]
+            layer["visible"] = not layer["visible"]
+        else:  # If it's a raster
+            raster_index = index - len(self.layers)
+            raster = self.rasters[raster_index]
+            raster["visible"] = not raster["visible"]
+
+        self.refresh_map()
+
+
+    def update_transparency(self, value):
+        selected = self.layer_list.curselection()
+        if not selected:
+            return
+        index = selected[0]
+
+        if index < len(self.layers):  # Vector layer
+            self.layers[index]["alpha"] = float(value)
+        else:  # Raster layer
+            raster_index = index - len(self.layers)
+            self.rasters[raster_index]["alpha"] = float(value)
+
+        self.refresh_map()
+
+
+    # Database-related Methods
+    def connect_to_postgres(self):
+        try:
+            conn = connect(
+                dbname="postgis_34_sample",
+                user="postgres",
+                password="Postgre",
+                host="127.0.0.1",
+                port="5432"
+            )
+            return conn
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to connect to database: {e}")
+            return None
+
+    def get_table_names(self, conn):
+        query = """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema='public';
+        """
+        try:
+            cur = conn.cursor()
+            cur.execute(query)
+            table_names = [row[0] for row in cur.fetchall()]
+            cur.close()
+            return table_names
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to fetch table names: {e}")
+            return []
+
+    def fetch_shapefile_from_db(self, conn, table_name):
+        query = f"SELECT * FROM public.{table_name};"
+        try:
+            gdf = gpd.GeoDataFrame.from_postgis(query, conn, geom_col="geom")
+            return gdf
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to fetch data from {table_name}: {e}")
+            return None
+
+    def fetch_data_from_db(self):
+        conn = self.connect_to_postgres()
+        if not conn:
+            return
+
+        # Open a dialog to select table
+        table_window = tk.Toplevel(self.root)
+        table_window.title("Fetch Data from Database")
+
+        tk.Label(table_window, text="Select Table").pack(pady=5)
+        table_combo = ttk.Combobox(table_window, values=self.get_table_names(conn), state="readonly")
+        table_combo.pack(pady=5)
+
+        def load_data():
+            table_name = table_combo.get()
+            if not table_name:
+                messagebox.showwarning("Warning", "No table selected.")
+                return
+
+            gdf = self.fetch_shapefile_from_db(conn, table_name)
+            if gdf is not None:
+                layer = {
+                    "gdf": gdf,
+                    "name": table_name,
+                    "path": f"Database: {table_name}",
+                    "visible": True,
+                    "color": "purple",
+                    "alpha": 1.0,
+                }
+                self.layers.append(layer)
+                self.layer_list.insert(tk.END, table_name)
+                self.refresh_map()
+                messagebox.showinfo("Success", f"Data from {table_name} loaded successfully!")
+                table_window.destroy()
+
+        tk.Button(table_window, text="Load Data", command=load_data).pack(pady=10)
+        
+    def run_buffer_tool(self):
+        selected = self.layer_list.curselection()
+        if not selected:
+            messagebox.showwarning("Warning", "No layer selected for buffering.")
+            return
+        index = selected[0]
+        layer = self.layers[index]
+
+        buffer_window = tk.Toplevel(self.root)
+        buffer_window.title("Buffer Tool")
+
+        tk.Label(buffer_window, text="Buffer Distance:").pack(pady=5)
+        distance_entry = tk.Entry(buffer_window)
+        distance_entry.pack(pady=5)
+
+        tk.Label(buffer_window, text="Select Unit:").pack(pady=5)
+        unit_combo = ttk.Combobox(buffer_window, values=["meters", "kilometers", "miles"], state="readonly")
+        unit_combo.pack(pady=5)
+
+        def perform_buffer():
+            try:
+                distance = float(distance_entry.get())
+                unit = unit_combo.get()
+
+                if unit == "kilometers":
+                    distance *= 1000
+                elif unit == "miles":
+                    distance *= 1609.34
+
+                buffered_gdf = layer["gdf"].buffer(distance)
+
+                # Save the output
+                input_dir = os.path.dirname(layer["path"])
+                output_dir = os.path.join(input_dir, "Buffer_Output")
+                os.makedirs(output_dir, exist_ok=True)
+                output_path = os.path.join(output_dir, f"{layer['name']}_buffered.shp")
+                buffered_gdf.to_file(output_path)
+
+                # Add new layer to map
+                new_layer = {
+                    "gdf": gpd.GeoDataFrame(geometry=buffered_gdf),
+                    "name": f"{layer['name']}_buffered",
+                    "path": output_path,
+                    "visible": True,
+                    "color": "green",
+                    "alpha": 1.0,
+                }
+                self.layers.append(new_layer)
+                self.layer_list.insert(tk.END, new_layer["name"])
+
+                messagebox.showinfo("Success", f"Buffered layer saved to {output_path}")
+                buffer_window.destroy()
+                self.refresh_map()
+            except Exception as e:
+                messagebox.showerror("Error", f"Buffering failed: {e}")
+
+        tk.Button(buffer_window, text="Buffer", command=perform_buffer).pack(pady=10)
+
+    def run_clip_tool(self):
+        if len(self.layers) < 2:
+            messagebox.showwarning("Warning", "You need at least two layers to perform clipping.")
+            return
+
+        clip_window = tk.Toplevel(self.root)
+        clip_window.title("Clip Tool")
+
+        # Select Clip Boundary Layer
+        tk.Label(clip_window, text="Select Clip Boundary").pack(pady=5)
+        clip_layer_combo = ttk.Combobox(
+            clip_window, values=[layer["name"] for layer in self.layers], state="readonly"
+        )
+        clip_layer_combo.pack(pady=5)
+
+        # Select Layers to Clip
+        tk.Label(clip_window, text="Select Layers to Clip").pack(pady=5)
+        layers_to_clip_listbox = tk.Listbox(clip_window, selectmode=tk.MULTIPLE)
+        for layer in self.layers:
+            layers_to_clip_listbox.insert(tk.END, layer["name"])
+        layers_to_clip_listbox.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        def perform_clip():
+            clip_index = clip_layer_combo.current()
+            selected_indices = layers_to_clip_listbox.curselection()
+
+            if clip_index == -1 or not selected_indices:
+                messagebox.showwarning("Warning", "Select a clip boundary and at least one layer to clip.")
+                return
+
+            clip_layer = self.layers[clip_index]
+            clip_gdf = clip_layer["gdf"]
+
+            for index in selected_indices:
+                layer_to_clip = self.layers[index]
+                layer_gdf = layer_to_clip["gdf"]
+
+                try:
+                    # Perform clip
+                    clipped_gdf = gpd.overlay(layer_gdf, clip_gdf, how="intersection")
+
+                    # Save the output
+                    input_dir = os.path.dirname(layer_to_clip["path"])
+                    output_dir = os.path.join(input_dir, "Clip_Output")
+                    os.makedirs(output_dir, exist_ok=True)
+                    output_path = os.path.join(output_dir, f"{layer_to_clip['name']}_clipped.shp")
+                    clipped_gdf.to_file(output_path)
+
+                    # Add new layer to map
+                    new_layer = {
+                        "gdf": clipped_gdf,
+                        "name": f"{layer_to_clip['name']}_clipped",
+                        "path": output_path,
+                        "visible": True,
+                        "color": "green",
+                        "alpha": 1.0,
+                    }
+                    self.layers.append(new_layer)
+                    self.layer_list.insert(tk.END, new_layer["name"])
+
+                    messagebox.showinfo("Success", f"Clipped layer saved to {output_path}")
+                except Exception as e:
+                    messagebox.showerror("Error", f"Clipping failed: {e}")
+
+            clip_window.destroy()
+            self.refresh_map()
+
+        tk.Button(clip_window, text="Clip", command=perform_clip).pack(pady=10)
+        
+    def run_extract_by_mask(self):
+        if not self.rasters or not self.layers:
+            messagebox.showwarning("Warning", "You need at least one raster and one boundary layer to perform extraction.")
+            return
+
+        # Extract by Mask Window
+        mask_window = tk.Toplevel(self.root)
+        mask_window.title("Extract by Mask")
+
+        # Select Raster
+        tk.Label(mask_window, text="Select Raster").pack(pady=5)
+        raster_combo = ttk.Combobox(
+            mask_window, values=[raster["name"] for raster in self.rasters], state="readonly"
+        )
+        raster_combo.pack(pady=5)
+
+        # Select Boundary Layer
+        tk.Label(mask_window, text="Select Boundary Layer").pack(pady=5)
+        layer_combo = ttk.Combobox(
+            mask_window, values=[layer["name"] for layer in self.layers], state="readonly"
+        )
+        layer_combo.pack(pady=5)
+
+        def perform_extraction():
+            raster_index = raster_combo.current()
+            layer_index = layer_combo.current()
+
+            if raster_index == -1 or layer_index == -1:
+                messagebox.showwarning("Warning", "Select both a raster and a boundary layer.")
+                return
+
+            raster = self.rasters[raster_index]
+            boundary_layer = self.layers[layer_index]
+
+            try:
+                # Get the geometry of the boundary layer
+                boundary_gdf = boundary_layer["gdf"]
+                geometry = [boundary_gdf.unary_union.__geo_interface__]
+
+                # Perform the mask operation
+                out_image, out_transform = mask(
+                    raster["raster"], geometry, crop=True
+                )
+                out_meta = raster["raster"].meta.copy()
+                out_meta.update({
+                    "driver": "GTiff",
+                    "height": out_image.shape[1],
+                    "width": out_image.shape[2],
+                    "transform": out_transform,
+                })
+
+                # Save the output raster
+                input_dir = os.path.dirname(raster["path"])
+                output_dir = os.path.join(input_dir, "ExtractByMask_Output")
+                os.makedirs(output_dir, exist_ok=True)
+                output_path = os.path.join(output_dir, f"{raster['name']}_masked.tif")
+                with rasterio.open(output_path, "w", **out_meta) as dest:
+                    dest.write(out_image)
+
+                # Add new raster to the map
+                new_raster = {
+                    "raster": rasterio.open(output_path),
+                    "name": f"{raster['name']}_masked",
+                    "path": output_path,
+                    "visible": True,
+                    "colormap": "gray",
+                    "alpha": 1.0,
+                }
+                self.rasters.append(new_raster)
+                self.layer_list.insert(tk.END, new_raster["name"])
+
+                messagebox.showinfo("Success", f"Extracted raster saved to {output_path}")
+                mask_window.destroy()
+                self.refresh_map()
+            except Exception as e:
+                messagebox.showerror("Error", f"Extraction failed: {e}")
+
+        tk.Button(mask_window, text="Extract", command=perform_extraction).pack(pady=10)
+
+    def refresh_map(self):
+        """Redraws the map with the current layers and zoom settings."""
+        self.ax.clear()
+
+        # Plot rasters
+        for raster_data in self.rasters:
+            if raster_data["visible"]:
+                colormap = raster_data.get("colormap", "gray")  # Default to 'gray'
+                alpha = raster_data.get("alpha", 1.0)  # Default to fully opaque
+                show(raster_data["raster"], ax=self.ax, cmap=colormap, alpha=alpha)
+
+        # Plot vector layers
+        for layer in self.layers:
+            if layer["visible"]:
+                layer["gdf"].plot(ax=self.ax, color=layer["color"], alpha=layer["alpha"])
+
+        # Restore zoom level if set
+        if self.xlim and self.ylim:
+            self.ax.set_xlim(self.xlim)
+            self.ax.set_ylim(self.ylim)
+            
+        self.canvas.draw()
+
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = GISApp(root)
+    root.mainloop()
